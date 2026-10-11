@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>墨心</title>
+<link rel="icon" href="data:,">
 <!-- 墨心 · 单文件水墨小游戏 · © 2026 kleinblue-dev · 保留所有权利
      未经许可请勿复制、镜像、再发布或商用。授权游玩地址仅此一个：
      https://kleinblue-dev.github.io/ink-mind/ · 指纹 MXFP-INKMIND-KLEINBLUE-DEV-20261011 -->
@@ -246,6 +247,7 @@
   </div>
   <div class="spacer"></div>
   <div class="ctl" id="tips">滚轮＝转动 · 点已落的墨可提起重摆</div>
+  <button id="btnUndo" title="撤销最后一次落墨">撤销</button>
   <button id="btnCommit">落墨</button>
   <button id="btnEnd" class="primary">这张就这样了</button>
 </footer>
@@ -911,6 +913,7 @@ const S = {
   hue: 0,          // 当前用色（HUES 下标，默认墨）。和 ink 同规矩：管"下一块"和选中的那块
   t0: 0,
   events: [],      // 每轮重置
+  stampStack: [],  // 落墨顺序栈（撤销用）：每次 commit 压一条 {i, st, t}；每轮重置
   rounds: [],      // 每轮结束的快照
   done: false,
   maskFail: [],    // 启动时没能解码的掩膜名字（空 = 全接上了）。这一项必须能被读到：
@@ -1060,6 +1063,7 @@ function liftToHand(i, st, x, y){
   p.placed = p.stamps.length ? p.stamps[p.stamps.length - 1] : null;   // 别名退到最后一笔
   S.hand = i; S.sel = i;
   p.live = Object.assign({}, st);
+  p.live.src = st;      // 记来源：撤销时能认出"手上这份是从栈顶那一笔提起来的"
   syncScaleUI(p.live.s);                             // 滑杆跟着这块走，否则显示的是上一块的比例
   S.hue = hueOf(st); syncHueUI();                    // 色板同样跟着这块走（口径④：点哪份调哪份）
   logEv('pickup', { piece: i, x: +x.toFixed(4), y: +y.toFixed(4) });
@@ -1363,6 +1367,7 @@ function commit(){
   });
   const e = S.events[S.events.length - 1];
   e.drift = drift == null ? null : +drift.toFixed(4);
+  S.stampStack.push({ i, st: rec, t: e.t });   // 撤销栈：后落的后撤（LIFO）
   /* 只手离开，sel 留着 —— 这块还在"手里"，滑杆/滚轮继续管它。
      再按一次落墨不会重复计数：上面 S.hand == null 就直接返回了。 */
   S.hand = null;
@@ -1372,6 +1377,31 @@ function commit(){
 }
 
 document.getElementById('btnCommit').addEventListener('click', commit);
+
+/* 撤销：撤掉**最近一次落墨**（后落的后撤）。撤销那一笔连它的位置、用色、
+   浓淡、旋转、缩放一起从纸上消失；不把墨放回手上 —— 想重摆就重新取块。
+   信号口径（本轮任务书 §二）：只记"撤了几次、落墨后多久才撤"两个数字，
+   解释一个字不写 —— 立刻撤和想了一会儿才撤，哪一种是什么人，这里不下结论。 */
+function undo(){
+  if (S.done) return;                    // 已收笔：纸上的记录冻结，不回头改（本轮口径）
+  const top = S.stampStack.pop();
+  if (!top) return;                      // 没得撤：不记事件、不动画面
+  const p = S.pieces[top.i];
+  const k = p.stamps.indexOf(top.st);
+  if (k >= 0){                           // 那一笔还在纸上：撤掉它
+    p.stamps.splice(k, 1);
+    p.placed = p.stamps.length ? p.stamps[p.stamps.length - 1] : null;   // 别名退到上一笔
+  } else if (p.live && p.live.src === top.st){   // 刚被提回手上：撤回 = 放下这次提起
+    p.live = null;
+    if (S.hand === top.i) S.hand = null;
+  } else {
+    return;                              // 那一笔已被提起、又换了新副本落下去 —— 画面无可撤
+  }
+  logEv('undo', { piece: top.i, after_ms: Math.round(now() - S.t0 - top.t) });
+  hint(true, '撤了这一笔 · 想重摆就再取一块');
+  refreshTray(); draw();
+}
+document.getElementById('btnUndo').addEventListener('click', undo);
 document.getElementById('btnRotL').addEventListener('click', () => rotate(-15));
 document.getElementById('btnRotR').addEventListener('click', () => rotate(15));
 
@@ -1442,6 +1472,7 @@ function behaviorFeatures(evs){
   const picks = evs.filter(e => e.type === 'pick');
   const rotates = evs.filter(e => e.type === 'rotate');
   const pickups = evs.filter(e => e.type === 'pickup');
+  const undos = evs.filter(e => e.type === 'undo');
   const inks = commits.map(e => e.ink);
   /* 每一笔的色号（缺省墨 0）—— hue_used / hue_sd 两个信号的原样数据 */
   const commitHues = commits.map(e => (e.hue == null ? 0 : e.hue));
@@ -1466,6 +1497,13 @@ function behaviorFeatures(evs){
     rotate_gestures: rotates.length,
     rotate_per_piece: commits.length ? +(rotates.length / commits.length).toFixed(2) : null,
     reposition_count: pickups.length,
+    /* 撤回信号（本轮任务书 §二）：只列数字，不写解释 ——
+       undo_count = 撤了几次；undo_per_piece = 平均每落一笔撤几次；
+       undo_after_ms = 从落墨到按下撤销的平均间隔（毫秒）。
+       「立刻撤」和「想了一会儿才撤」这两种读法的解释权留给以后的数据，卡片上不下结论。 */
+    undo_count: undos.length,
+    undo_per_piece: commits.length ? +(undos.length / commits.length).toFixed(2) : null,
+    undo_after_ms: undos.length ? Math.round(mean(undos.map(e => e.after_ms))) : null,
     first_place_ms: (firstPick != null && firstCommit != null) ? firstCommit - firstPick : null,
     active_ms: activeMs(evs),
     wall_ms: evs.length ? evs[evs.length - 1].t : 0,
@@ -1533,6 +1571,7 @@ function resetRound(){
   S.pieces = SPECS.map(s => ({ spec: s, stamps: [], placed: null, live: null }));
   S.hand = null; S.sel = null; S.drag = null;         // 换轮了，滑杆谁都不管
   S.events = [];
+  S.stampStack = [];                                  // 撤销栈跟着轮走：上一张的墨不许穿越回来
   S.t0 = now(); lastT = 0; lastRotT = 0; rotAccum = 0; lastScaleT = 0;
   scaleEl.value = 100; paintScaleLabel(1);            // 新手势、新滑杆位置，不然会带着上一张的比例
   rndLabel.textContent = ['第一张', '第二张', '第三张'][S.round - 1] + ' / 三';
@@ -1560,12 +1599,17 @@ const LABELS = {
   scale_mean:             ['大小均值', '你落下的每一块，平均被放到原样的几倍（没动过滑杆就是 1.00）'],
   scale_range:            ['大小跨度', '同一张里最大的一块和最小的一块差多少（没调过就是 0）'],
   reposition_count:       ['提起重摆次数', '已经落下的墨，被你提起来重摆了几次'],
+  /* 撤回三行（本轮任务书 §二）：只列数字。竞争解释各占一半（手滑 / 想了一下），
+     谁也不比谁强 —— 所以这里只写"是记录、不是判断"，不下任何结论。 */
+  undo_count:             ['撤回次数', '一共按了几次「撤销」（撤回次数是记录，不是判断）'],
+  undo_per_piece:         ['每笔撤回比', '平均每落一笔墨撤回了多少次（记录，不是判断）'],
+  undo_after_ms:          ['撤回间隔(毫秒)', '从落墨到按下撤销，平均隔了多久（记录，不是判断）'],
   first_place_ms:         ['第一笔酝酿(毫秒)', '从取第一块墨，到真正落下第一块墨，中间隔了多久'],
   active_ms:              ['动手总时长(毫秒)', '去掉超过 10 秒的空档后的总时长'],
 };
 function showSheet(){
   const agg = S.rounds.map(r => r.features);
-  const keys = ['pieces_used', 'blank_ratio', 'edge_blank', 'center_bias', 'ink_mean', 'ink_sd', 'hue_used', 'hue_sd', 'rotate_per_piece', 'scale_mean', 'scale_range', 'reposition_count', 'first_place_ms', 'active_ms'];
+  const keys = ['pieces_used', 'blank_ratio', 'edge_blank', 'center_bias', 'ink_mean', 'ink_sd', 'hue_used', 'hue_sd', 'rotate_per_piece', 'scale_mean', 'scale_range', 'reposition_count', 'undo_count', 'undo_per_piece', 'undo_after_ms', 'first_place_ms', 'active_ms'];
   /* 轮间变化给"相邻两对"，不是"首尾一对"。
      只比第三张与第一张会漏掉中途那次最大的波动：有人第二张突然铺开、第三张又收回来，
      首尾差读起来像"什么都没发生"，而那一次变化恰恰最该被看见。 */
