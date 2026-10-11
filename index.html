@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>墨心</title>
+<!-- 墨心 · 单文件水墨小游戏 · © 2026 kleinblue-dev · 保留所有权利
+     未经许可请勿复制、镜像、再发布或商用。授权游玩地址仅此一个：
+     https://kleinblue-dev.github.io/ink-mind/ · 指纹 MXFP-INKMIND-KLEINBLUE-DEV-20261011 -->
 <style>
   :root{
     --paper:#f7f4ec; --ink:#1a1a18; --bg:#e9e5da; --line:#c9c3b4;
@@ -31,6 +34,12 @@
     background:#f0ece1; color:var(--dim); font-size:12.5px; line-height:1.6;
   }
   #what b{color:var(--accent); font-weight:500; letter-spacing:.06em}
+  /* 版权声明条（2026-10-11）：和免责一样常驻、不折叠 —— 它不参与任何判定，
+     只把「这是谁的、什么条件下能拿走」写在用户眼皮底下（也给侵权投诉留界面证据）。 */
+  #legal{
+    flex:0 0 auto; padding:3px 26px 4px; background:#f0ece1; color:var(--dim);
+    font-size:11.5px; letter-spacing:.04em; border-bottom:1px solid var(--line);
+  }
 
   main{flex:1; display:flex; gap:20px; padding:18px 26px; min-height:0}
   #stage{flex:1; display:flex; align-items:center; justify-content:center; min-width:0}
@@ -158,6 +167,7 @@
     header h1{font-size:17px}
     header .sub{font-size:12px}
     #what{padding:6px 14px; font-size:11.5px; line-height:1.55}
+    #legal{padding:2px 14px 3px; font-size:11px}
     main{flex:0 0 auto; flex-direction:column; gap:10px; padding:10px 14px 12px}
     #stage{flex:0 0 auto}
     #paperWrap{width:100%; max-width:none}
@@ -195,6 +205,7 @@
   <b>这不是测验。</b>这是自我探索工具。它不打分、不评级、不诊断，里面也没有任何心理学量表 ——
   只有一件事：把你刚才怎么下笔，按原始数字列出来。数据不联网，只留在这台机器上。
 </div>
+<div id="legal">墨心 © 2026 kleinblue-dev · 保留所有权利 · 未经许可请勿复制、镜像、再发布或商用</div>
 
 <main>
   <div id="stage">
@@ -1662,6 +1673,32 @@ function download(name, blob){
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+/* ---------- 版权卡口与指纹（2026-10-11） ----------
+   「整份文件被搬走、换个域名再发布」是最常见的盗用形态。客户端文件防不了整份
+   复制（浏览器必须拿到文件才能跑）—— 这一段做的是两件别的事：
+   ① 提高搬运成本：不改这里，搬到别处打开只会看到「请到原址玩」，游戏不启动；
+   ② 留下证据：要让它跑，就得删改这一段 —— 那本身就是故意的痕迹。
+   白名单＝作者指定发布地址 + 本机 file://（双击即玩）+ 本机环回（开发探针）。
+   以后换托管地址：改 MX_ALLOWED_HOSTS 这一行即可。
+   验证：tools/verify-provenance.cjs（P1–P8）；证伪：tools/_falsify-provenance.cjs。 */
+const MX_WATERMARK = 'MXFP-INKMIND-KLEINBLUE-DEV-20261011';
+const MX_SOURCE_URL = 'https://kleinblue-dev.github.io/ink-mind/';
+const MX_ALLOWED_HOSTS = ['kleinblue-dev.github.io', 'localhost', '127.0.0.1'];
+function mxAuthorizedLocation(){
+  return location.protocol === 'file:' || MX_ALLOWED_HOSTS.indexOf(location.hostname) >= 0;
+}
+function mxShowLockNotice(){
+  document.title = '墨心 · 非授权副本';
+  document.body.innerHTML =
+    '<main id="mx-lock" style="max-width:640px;margin:9vh auto;padding:0 26px;'
+    + 'font:15px/1.9 -apple-system,&quot;PingFang SC&quot;,&quot;Microsoft YaHei&quot;,system-ui,sans-serif;color:#1a1a18">'
+    + '<h1 style="font-size:19px;letter-spacing:.2em;font-weight:500">墨心</h1>'
+    + '<p>你打开的这份副本不在授权地址上，游戏没有启动。</p>'
+    + '<p>请到原地址玩：<a href="' + MX_SOURCE_URL + '" style="color:#3d4a3a">' + MX_SOURCE_URL + '</a></p>'
+    + '<p style="color:#8b8577;font-size:13px">墨心 © 2026 kleinblue-dev 保留所有权利 · 指纹 ' + MX_WATERMARK + '</p>'
+    + '</main>';
+}
+
 /* ---------- 启动 ---------- */
 /* 掩膜数据是 data URL，解码是异步的，所以整个启动包进一个 async。
    顺带把"到底接上了没有"变成可判的：window.__moxin 在**全部解码之后**才出现，
@@ -1669,6 +1706,7 @@ function download(name, blob){
    （这个项目被这种假阴性咬过：早先一个探针查"命令行里含 ink-mind 的进程"，
      而已经开着的浏览器是经 IPC 收 URL 的，命令行里根本没有它。） */
 (async function boot(){
+  if (!mxAuthorizedLocation()){ mxShowLockNotice(); return; }
   const el = document.getElementById('maskData');
   let data = {};
   try { data = JSON.parse(el ? el.textContent : '{}') || {}; }
@@ -1725,6 +1763,11 @@ window.__moxin = {
   piece(i, ink, hue){ return getPieceCanvas(SPECS[i], ink == null ? S.ink : ink, hue == null ? S.hue : hue); },
   /* 色表（探针/文档用）：只有色值、名字和视觉重量系数 —— 没有任何"情绪"字段 */
   get hues(){ return HUES.map((h, i) => ({ i, id: h.id, name: h.name, css: h.css, f: h.f })); },
+  /* 版权与指纹（2026-10-11）：只读自报 —— 挂在这儿的目的是可被探针当场查。
+     拦截逻辑在 boot 开头（非授权地址 ⇒ 只显示「请到原址玩」提示，游戏不启动）。 */
+  get provenance(){
+    return { watermark: MX_WATERMARK, authorized: mxAuthorizedLocation(), source: MX_SOURCE_URL };
+  },
   api: {
     pick(i){ onChip(i); },
     moveTo(x, y){ if (S.hand != null && S.pieces[S.hand].live){ S.pieces[S.hand].live.x = x; S.pieces[S.hand].live.y = y; draw(); } },
