@@ -97,6 +97,17 @@
   .ctl{display:flex; align-items:center; gap:11px}
   input[type=range]{width:190px; accent-color:var(--accent)}
   .swatch{font-size:12px; letter-spacing:.1em; color:var(--dim); min-width:3.2em}
+  /* 色板：默认只露「墨」+ 一个展开钮，展开才见其余四色 —— 不默认展示五色，
+     防的是"先挑色、再想构图"。色相只是换一支笔的墨色，不是给情绪编码。
+     灰色"用过"痕迹 (.chip.used) 保留，但永远不拦点击 —— 点了就再取一块同款。 */
+  .hueDot{
+    width:18px; height:18px; border-radius:50%; padding:0; min-width:0;
+    border:1px solid var(--line); cursor:pointer;
+  }
+  .hueDot.sel{border-color:var(--accent); box-shadow:0 0 0 2px rgba(61,74,58,.22)}
+  #hueMore{display:none; align-items:center; gap:7px}
+  #hueMore.on{display:flex}
+  #hueToggle{font-size:12px; padding:4px 10px}
   button{
     font:inherit; font-size:13.5px; padding:7px 17px; border:1px solid var(--line);
     background:var(--paper); color:var(--ink); border-radius:3px; cursor:pointer;
@@ -203,6 +214,17 @@
     <span class="swatch" id="inkName">墨色</span>
     <input type="range" id="ink" min="12" max="100" value="68">
   </div>
+  <div class="ctl" id="hueCtl">
+    <span class="swatch">用色</span>
+    <button class="hueDot sel" id="hue-0" data-hue="0" title="墨" aria-label="用色：墨"></button>
+    <button id="hueToggle" title="想换色再展开 —— 先用墨画">调色 ▸</button>
+    <span id="hueMore">
+      <button class="hueDot" id="hue-1" data-hue="1" title="赭石"></button>
+      <button class="hueDot" id="hue-2" data-hue="2" title="花青"></button>
+      <button class="hueDot" id="hue-3" data-hue="3" title="藤黄"></button>
+      <button class="hueDot" id="hue-4" data-hue="4" title="朱砂"></button>
+    </span>
+  </div>
   <div class="ctl">
     <span class="swatch" id="scaleName">大小 ×1.00</span>
     <input type="range" id="scale" min="50" max="180" value="100">
@@ -239,6 +261,25 @@ const W = 800, H = 560;          // 纸的逻辑尺寸
 const D = 2;                      // 内部渲染倍率（导出清晰度）
 const INK = '#1a1a18';
 const PAPER = '#f7f4ec';
+/* ---------- 传统国画色 ----------
+   色相在渲染里的唯一作用：把 fillStyle 从墨色换成这一色（掩膜块换成同 alpha 的
+   着色副本）。湿晕/主体/骨/飞白四层管线一毫米不动。
+   f 是"同一支滑杆下的视觉重量补偿"：每色单独目检调过（赭石/藤黄在纸上比墨轻，
+   不抬 alpha 会显得"没蘸饱"），读数与截图见 tools/_probe-colors.cjs。
+   2026-10-11 目检校准（实测重量比 = 该色/墨，0.68 档）：赭石 0.68 · 花青 0.75 ·
+   藤黄 0.50 · 朱砂 0.77（0.26–0.93 档 ±0.03）。比值到不了 1 是物理下限：核心处
+   颜料饱和成自己的颜色，亮度由色相定；f 只推中调和晕边（还过 Math.min(1,…) 封顶）。
+   藤黄偏轻是有意的 —— 黄色本就比墨亮，拉齐会发闷变褐。这组数由 verify-hue H2 守。
+   这里面没有一个字是"颜色→情绪" —— 信号卡只记哪几笔、用了什么色，不解释。 */
+const HUES = [
+  { id: 'mo',        name: '墨',   css: INK,       f: 1.00 },
+  { id: 'zheshi',    name: '赭石', css: '#a35a2e', f: 1.30 },
+  { id: 'huaqing',   name: '花青', css: '#31556f', f: 1.04 },
+  { id: 'tenghuang', name: '藤黄', css: '#b9902a', f: 1.62 },
+  { id: 'zhusha',    name: '朱砂', css: '#a83a2c', f: 1.14 },
+];
+/* 色号的唯一取法。缺省/越界一律回到墨（0）—— 老记录、外部调用都安全。 */
+function hueOf(st){ const h = st && st.hue; return (h == null || !HUES[h]) ? 0 : h; }
 const STORE_KEY = 'moxin_v1';
 
 /* ---------- 可复现随机 ---------- */
@@ -405,8 +446,9 @@ function buildRibs(img, nw, nh){
 /* ---------- 生成一块墨（离屏） ---------- */
 const pieceCache = new Map();
 const INSET = 0.62;      // 几何只用 canvas 中间这片 ⇒ 四周留白，blur 不会被边缘裁成直角
-function renderPiece(spec, ink){
-  if (spec.mask) return renderPieceMask(spec, ink);
+function renderPiece(spec, ink, hue){
+  if (spec.mask) return renderPieceMask(spec, ink, hue);
+  const hd = HUES[hue == null ? 0 : hue] || HUES[0];
   const cw = Math.round(spec.w * D), ch = Math.round(spec.h * D);
   const cv = document.createElement('canvas');
   cv.width = cw; cv.height = ch;
@@ -432,8 +474,8 @@ function renderPiece(spec, ink){
   const layer = (alpha, opt) => {
     const o = opt || {};
     ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = INK;
+    ctx.globalAlpha = Math.min(1, alpha * hd.f);   // 色相重量补偿只乘在这一处
+    ctx.fillStyle = hd.css;
     /* 每一笔各自扰动。所有笔共用同一套扰动的话，多笔元素会被整体推来推去，
        看起来像一坨贴上去的影子，而不是一笔一笔画上去的 */
     for (const m of mains){
@@ -535,14 +577,27 @@ function renderPiece(spec, ink){
    只有一处不同 —— "重描一遍"这个动作，从"沿形状线再描一次"换成"把整层形状按圆盘核再叠一次"。
    这一步是必须的：形状借来的素材只能**当过墨迹渲染的形状**用，不能当贴图用。
    木刻白描是硬边黑线（tools/_mat-cut.cjs 出来就是那个样子），贴上去一眼是贴纸。 */
-function renderPieceMask(spec, ink){
+function renderPieceMask(spec, ink, hue){
   const cw = Math.round(spec.w * D), ch = Math.round(spec.h * D);
   const cv = document.createElement('canvas');
   cv.width = cw; cv.height = ch;
   const ctx = cv.getContext('2d');
   const iw = cw * INSET, ih = ch * INSET;
   ctx.translate((cw - iw) / 2, (ch - ih) / 2);
-  const img = maskImgs[spec.mask];
+  /* 掩膜是位图，换不了 fillStyle —— 先做一张"同 alpha、只换颜色"的副本
+     （source-in：保 alpha、换色），之后每一遍照旧画它；墨色时不复制，逐位同以前。 */
+  const hd = HUES[hue == null ? 0 : hue] || HUES[0];
+  const srcImg = maskImgs[spec.mask];
+  let img = srcImg;
+  if (hd.css !== INK){
+    img = document.createElement('canvas');
+    img.width = srcImg.width; img.height = srcImg.height;
+    const tg = img.getContext('2d');
+    tg.drawImage(srcImg, 0, 0);
+    tg.globalCompositeOperation = 'source-in';
+    tg.fillStyle = hd.css;
+    tg.fillRect(0, 0, img.width, img.height);
+  }
   const ribs = maskRibs[spec.mask] || [];
   const rnd = mulberry32(spec.seed * 7 + 13);
   const base = Math.max(iw, ih);
@@ -577,7 +632,7 @@ function renderPieceMask(spec, ink){
     if (!(alpha > 0)) return;
     const o = opt || {};
     ctx.save();
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = Math.min(1, alpha * hd.f);   // 色相重量补偿只乘在这一处
     const s = o.inflate || 1;
     ctx.translate(iw / 2 + (o.dx || 0), ih / 2 + (o.dy || 0));
     ctx.scale(s, s);
@@ -630,17 +685,19 @@ function renderPieceMask(spec, ink){
   return cv;
 }
 const PIECE_CACHE_MAX = 60;
-function getPieceCanvas(spec, ink){
+function getPieceCanvas(spec, ink, hue){
   const q = Math.round(Math.min(1, Math.max(0.12, ink)) * 10);  // 量化到 0.1 → 缓存
-  const key = spec.seed + '_' + q;
+  const hq = (hue == null || !HUES[hue]) ? 0 : hue;             // 色号也进缓存键：同块不同色是两张图
+  const key = spec.seed + '_' + q + '_' + hq;
   let cv = pieceCache.get(key);
   if (cv){ pieceCache.delete(key); pieceCache.set(key, cv); return cv; }   // 命中就挪到队尾 = LRU
-  cv = renderPiece(spec, q / 10);
+  cv = renderPiece(spec, q / 10, hq);
   pieceCache.set(key, cv);
   /* 上限必须真的封顶，不能只是"理论上不会太多"：
      19 块 × 10 档墨色 = 190 张离屏位图，最大的几张各约 0.6MB，
      一路拉着墨色滑杆走完全程就是 100MB+。超了就丢最久没用过的。
-     丢掉的只是缓存 —— 下次要用会重画，画出来一模一样（种子固定）。 */
+     丢掉的只是缓存 —— 下次要用会重画，画出来一模一样（种子固定）。
+     色号进了键之后组合数 ×5，但真人一局用不到几色，60 照旧封顶。 */
   if (pieceCache.size > PIECE_CACHE_MAX) pieceCache.delete(pieceCache.keys().next().value);
   return cv;
 }
@@ -829,7 +886,7 @@ let SPECS = [];
 /* ---------- 状态 ---------- */
 const S = {
   round: 1,
-  pieces: [],      // {i, spec, placed:null|{x,y,rot,ink}, live:null|{x,y,rot,ink}}
+  pieces: [],      // {i, spec, stamps:[{x,y,rot,s,ink,hue}], placed:最近一笔别名|null, live:null|{...}}
   hand: null,      // 手正在拿的那块（index）—— 只管能不能拖
   /* sel = 滑杆/滚轮正在作用的那一块。
      为什么和 hand 分开：原来两者共用一个 hand，而 commit() 结尾把 hand 清空 ⇒
@@ -840,6 +897,7 @@ const S = {
   sel: null,
   drag: null,      // {dx, dy} 拖动中
   ink: 0.68,
+  hue: 0,          // 当前用色（HUES 下标，默认墨）。和 ink 同规矩：管"下一块"和选中的那块
   t0: 0,
   events: [],      // 每轮重置
   rounds: [],      // 每轮结束的快照
@@ -888,7 +946,7 @@ function liveOf(i){
    否则会出现"看着在那儿、点不中"或"留白比例算的是没缩过的墨"。 */
 function scaleOf(st){ return (st && st.s != null) ? st.s : 1; }
 function drawPiece(ctx2, spec, st, alpha){
-  const cv = getPieceCanvas(spec, st.ink);
+  const cv = getPieceCanvas(spec, st.ink, hueOf(st));
   const k = scaleOf(st);
   ctx2.save();
   if (alpha != null) ctx2.globalAlpha = alpha;
@@ -904,10 +962,11 @@ function draw(){
   ctx.setTransform(D, 0, 0, D, 0, 0);
   ctx.drawImage(paperCanvas, 0, 0, W, H);
 
-  /* 先画所有已落定的 */
+  /* 先画所有已落定的。盖章式：同一块可以落 N 笔，每一笔都在 stamps 里、都照画 ——
+     手里这块自己旧的那几笔也留在纸上（提起的只是被点中的那一笔）。 */
   for (let i = 0; i < S.pieces.length; i++){
     const p = S.pieces[i];
-    if (p.placed && i !== S.hand) drawPiece(ctx, p.spec, p.placed);
+    for (const st of p.stamps) drawPiece(ctx, p.spec, st);
   }
 
   /* 手上这块：带虚线定界 + 方向指示 */
@@ -957,7 +1016,7 @@ function buildTray(){
     const scale = Math.min(78 / spec.w, 54 / spec.h, 1);
     c.width = Math.round(spec.w * scale); c.height = Math.round(spec.h * scale);
     const cc = c.getContext('2d');
-    const src = getPieceCanvas(spec, S.ink);
+    const src = getPieceCanvas(spec, S.ink, S.hue);
     cc.drawImage(src, 0, 0, c.width, c.height);
     d.appendChild(c);
     d.addEventListener('click', () => onChip(i));
@@ -970,22 +1029,28 @@ function refreshTray(){
   [...trayEl.querySelectorAll('.chip')].forEach((el) => {
     const i = +el.dataset.i;
     const p = S.pieces[i];
-    el.classList.toggle('used', !!(p && p.placed) && i !== S.sel);
+    /* 变灰 = 用过（这块在纸上留过痕）—— 只是痕迹，不拦点击：永远可点，
+       点了就再取一块同款（盖章式多份）。当前正调的那块亮着 sel 不显灰。 */
+    el.classList.toggle('used', !!(p && p.stamps.length) && i !== S.sel);
     el.classList.toggle('sel', i === S.sel);          // 落墨后仍然亮着 = "还在调这块"
   });
 }
 
 /* ---------- 交互 ---------- */
-/* 把一块**已经落在纸上**的墨提回手里（点纸上的它、或点托盘上亮着的那格）。
-   抽成函数是因为它有两个入口，两处必须记同一种事件，否则"提起重摆次数"这个
-   行为信号会取决于你从哪儿点的。 */
-function liftToHand(i, x, y){
+/* 把**纸上被点中的那一笔墨**提回手里。入口只有纸面一处
+   （托盘格子现在一律发新副本，不再从这里提）—— 从 stamps 里精确摘出被点的那一笔，
+   同块的别的笔留在纸上；"提起重摆次数"记的就是这个动作。 */
+function liftToHand(i, st, x, y){
   const p = S.pieces[i];
-  if (!p || !p.placed) return;
+  if (!p || !st) return;
+  const k = p.stamps.indexOf(st);
+  if (k < 0) return;                                 // 不是这块纸上的笔 —— 不接
+  p.stamps.splice(k, 1);                             // 只提起被点中的那一笔
+  p.placed = p.stamps.length ? p.stamps[p.stamps.length - 1] : null;   // 别名退到最后一笔
   S.hand = i; S.sel = i;
-  p.live = Object.assign({}, p.placed);
-  p.placed = null;
+  p.live = Object.assign({}, st);
   syncScaleUI(p.live.s);                             // 滑杆跟着这块走，否则显示的是上一块的比例
+  S.hue = hueOf(st); syncHueUI();                    // 色板同样跟着这块走（口径④：点哪份调哪份）
   logEv('pickup', { piece: i, x: +x.toFixed(4), y: +y.toFixed(4) });
   hint(true, '提起重摆 · 滚轮转动 · 落墨');
   refreshTray(); draw();
@@ -994,26 +1059,21 @@ function liftToHand(i, x, y){
 function onChip(i){
   if (S.done) return;
   const p = S.pieces[i];
-  /* 已落定的块要从纸上提，不从托盘取 —— 除非它正是"当前这块"
-     （刚落完墨、方块还亮着）。那种情况下点它 = 从纸上提回来，
-     和点纸上的它是同一件事；否则一个亮着的高亮格子点了没反应，
-     就是刚修掉的那种"控件在骗人"。 */
-  if (p.placed && S.hand !== i){
-    if (i !== S.sel) return;
-    liftToHand(i, p.placed.x, p.placed.y);
-    return;
-  }
   if (S.hand === i){ S.hand = null; S.sel = null; p.live = null; refreshTray(); draw(); return; }
-  if (S.hand != null){                               // 手上有别的 → 换手（原来那块退回）
-    const old = S.pieces[S.hand];
-    if (!old.placed) old.live = null;
+  if (S.hand != null){
+    /* 手上有别的 → 换手：旧块手上那一份收回（只收"还没盖下去"的 live，
+       纸上的笔全部留着 —— 盖章式里它们已经是画面的一部分了）。 */
+    S.pieces[S.hand].live = null;
   }
   S.hand = i; S.sel = i;
-  /* 从托盘取是全新的（比例回 1）；手中这块本来就有比例的话要接着用它 */
-  const base = p.placed || { rot: 0, s: 1 };
-  p.live = { x: 0.5, y: 0.5, rot: base.rot, s: base.s, ink: S.ink };
+  /* 托盘取块 = 永远发一张**新副本**（本轮口径①②：不限份数；格子变灰只是
+     "用过"的痕迹，永远可点，点了就再拿一块同款）。新副本接着这块**上一笔**的
+     角度和比例（手感连续，不至于每次都被弹回原样），位置回纸中央；
+     浓淡与用色用当前笔上的设置。 */
+  const base = p.stamps.length ? p.stamps[p.stamps.length - 1] : { rot: 0, s: 1 };
+  p.live = { x: 0.5, y: 0.5, rot: base.rot, s: base.s, ink: S.ink, hue: S.hue };
   syncScaleUI(p.live.s);
-  logEv('pick', { piece: i, retake: !!p.placed });
+  logEv('pick', { piece: i, copy: p.stamps.length + 1 });   // copy＝这是这块的第几份
   hint(true, '点到纸上落位');
   refreshTray(); draw();
 }
@@ -1026,18 +1086,22 @@ function uv(e){
   };
 }
 function hitTest(ux, uy){
+  /* 盖章式：一块可能有多笔。新的压旧的 —— 从后往前找，先摸到最新那一笔。
+     返回 {i, st}（哪一块、哪一笔）；提起时只提被点中的这一笔。 */
   for (let i = S.pieces.length - 1; i >= 0; i--){
     const p = S.pieces[i];
-    if (!p.placed || i === S.hand) continue;
-    const st = p.placed;
-    const dx = (ux - st.x) * W, dy = (uy - st.y) * H;
-    const a = -st.rot * Math.PI / 180;
-    const lx = dx * Math.cos(a) - dy * Math.sin(a);
-    const ly = dx * Math.sin(a) + dy * Math.cos(a);
-    const k = scaleOf(st);
-    if (Math.abs(lx) <= p.spec.w * k / 2 && Math.abs(ly) <= p.spec.h * k / 2) return i;
+    if (i === S.hand) continue;
+    for (let j = p.stamps.length - 1; j >= 0; j--){
+      const st = p.stamps[j];
+      const dx = (ux - st.x) * W, dy = (uy - st.y) * H;
+      const a = -st.rot * Math.PI / 180;
+      const lx = dx * Math.cos(a) - dy * Math.sin(a);
+      const ly = dx * Math.sin(a) + dy * Math.cos(a);
+      const k = scaleOf(st);
+      if (Math.abs(lx) <= p.spec.w * k / 2 && Math.abs(ly) <= p.spec.h * k / 2) return { i, st };
+    }
   }
-  return -1;
+  return null;
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -1060,8 +1124,8 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
   const hit = hitTest(p0.x, p0.y);
-  if (hit >= 0){
-    liftToHand(hit, p0.x, p0.y);
+  if (hit){
+    liftToHand(hit.i, hit.st, p0.x, p0.y);
     S.drag = { dx: 0, dy: 0 };
     canvas.setPointerCapture(e.pointerId);
   }
@@ -1212,6 +1276,50 @@ inkEl.addEventListener('input', () => {
     draw();
   }
 });
+
+/* ---------- 用色（色板）----------
+   默认只露「墨」+ 一个展开钮，展开才见其余四色 —— 不默认展示五色，
+   防的是"先挑色、再想构图"。色相只是换一支笔的墨色，不是给情绪编码。
+   **刻意不 logEv**：色板开合/点选不是"下笔动作"，而 setScale/rotate 的手势合并
+   （canMerge）看的是事件队列的**队尾** —— 夹进来一条无关事件，下一个 800ms 内的
+   真手势就会被判成"新事件"，把"一次调整"记成两次。信号只认落在纸上的笔。 */
+function syncHueUI(){
+  for (let h = 0; h < HUES.length; h++){
+    const el = document.getElementById('hue-' + h);
+    if (el) el.classList.toggle('sel', h === S.hue);
+  }
+}
+function setHue(h){
+  if (!HUES[h]) return;
+  S.hue = h;
+  if (S.sel != null){
+    const p = S.pieces[S.sel];
+    /* 手上正在拿的、和已经落下的，都改 —— 和墨色滑杆同一条口径（口径④）。
+       注意：改的是"这块当前这一笔"（live 或别名指的那笔），同块别的笔不动。 */
+    const st = p && (p.live || p.placed);
+    if (st) st.hue = h;
+    draw();
+  }
+  rebuildThumbs();                 // 托盘缩略图跟着当前用色走
+  syncHueUI();
+}
+{
+  const more = document.getElementById('hueMore');
+  const tg = document.getElementById('hueToggle');
+  if (more && tg){
+    tg.addEventListener('click', () => {
+      const on = more.classList.toggle('on');
+      tg.textContent = on ? '调色 ▾' : '调色 ▸';
+    });
+  }
+  for (let h = 0; h < HUES.length; h++){
+    const el = document.getElementById('hue-' + h);
+    if (!el) continue;
+    el.style.background = HUES[h].css;              // 色点就画成这一色本身
+    el.setAttribute('aria-label', '用色：' + HUES[h].name);
+    el.addEventListener('click', () => setHue(h));
+  }
+}
 function rebuildThumbs(){
   /* 同样不能按 children 下标认块 —— 组标题也混在里面，它们没有 <canvas>，
      照老写法点一下墨色滑杆就 getContext of null。托盘里凡是按位置取块的地方都得改。 */
@@ -1219,7 +1327,7 @@ function rebuildThumbs(){
     const spec = SPECS[+el.dataset.i];
     const c = el.querySelector('canvas');
     if (!c) return;
-    const src = getPieceCanvas(spec, S.ink);
+    const src = getPieceCanvas(spec, S.ink, S.hue);
     const g = c.getContext('2d');
     g.clearRect(0, 0, c.width, c.height);
     g.drawImage(src, 0, 0, c.width, c.height);
@@ -1231,12 +1339,16 @@ function commit(){
   if (S.hand == null || S.done) return;
   const i = S.hand, p = S.pieces[i], st = p.live;
   if (!st) return;
-  const drift = p.placed ? Math.hypot(st.x - p.placed.x, st.y - p.placed.y) : null;
-  p.placed = { x: st.x, y: st.y, rot: st.rot, s: st.s, ink: st.ink };
+  const prev = p.stamps.length ? p.stamps[p.stamps.length - 1] : null;   // 同块上一次落点
+  const drift = prev ? Math.hypot(st.x - prev.x, st.y - prev.y) : null;
+  const rec = { x: st.x, y: st.y, rot: st.rot, s: st.s, ink: st.ink, hue: hueOf(st) };
+  p.stamps.push(rec);                 // 盖章式：这一笔入册，同一块之前的笔一笔不动
+  p.placed = rec;                     // 别名 = 最近一笔（滑杆/外部读数走它）
   p.live = null;
   logEv('commit', {
     piece: i, x: +st.x.toFixed(4), y: +st.y.toFixed(4),
     rot: Math.round(st.rot), s: +scaleOf(st).toFixed(3), ink: +st.ink.toFixed(2),
+    hue: rec.hue,
   });
   const e = S.events[S.events.length - 1];
   e.drift = drift == null ? null : +drift.toFixed(4);
@@ -1320,6 +1432,13 @@ function behaviorFeatures(evs){
   const rotates = evs.filter(e => e.type === 'rotate');
   const pickups = evs.filter(e => e.type === 'pickup');
   const inks = commits.map(e => e.ink);
+  /* 每一笔的色号（缺省墨 0）—— hue_used / hue_sd 两个信号的原样数据 */
+  const commitHues = commits.map(e => (e.hue == null ? 0 : e.hue));
+  const hueCount = new Map();
+  for (const h of commitHues) hueCount.set(h, (hueCount.get(h) || 0) + 1);
+  const hueUsed = [...hueCount.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])      // 按次数降序；同次数按色号升序（定死，不随 Map 序）
+    .map(([h, n]) => [h, n]);
   const scalesEv = evs.filter(e => e.type === 'scale');
   const scales = commits.map(e => (e.s == null ? 1 : e.s));
   const firstPick = picks.length ? picks[0].t : null;
@@ -1329,6 +1448,10 @@ function behaviorFeatures(evs){
     pieces_used_ratio: +(commits.length / SPECS.length).toFixed(4),
     ink_mean: inks.length ? +mean(inks).toFixed(3) : null,
     ink_sd: inks.length > 1 ? +sd(inks).toFixed(3) : null,
+    /* 用色信号（本轮任务书 §一 改动二）：只记"哪几笔用了什么色"，一个字的解释都不写。
+       hue_used = [色号, 次数]（按次数降序）；hue_sd = 每笔色号的离散度（少于两笔没法散）。 */
+    hue_used: hueUsed,
+    hue_sd: commitHues.length > 1 ? +sd(commitHues).toFixed(3) : null,
     rotate_gestures: rotates.length,
     rotate_per_piece: commits.length ? +(rotates.length / commits.length).toFixed(2) : null,
     reposition_count: pickups.length,
@@ -1365,9 +1488,11 @@ function behaviorFeatures(evs){
 /* ---------- 收笔一轮 ---------- */
 function endRound(){
   if (S.done) return;
-  const placed = S.pieces
-    .map((p, i) => ({ i, spec: p.spec, st: p.placed }))
-    .filter(o => o.st);
+  /* 盖章式：一块可能落了好几笔 —— 画像读数按**纸上真实的每一笔**算，
+     不能让"最后一笔"代表整块（那样留白/重心会漏掉同块的其它笔）。
+     pieces_placed 因此与 pieces_used 同一口径：都是**笔数**。 */
+  const placed = [];
+  S.pieces.forEach((p, i) => { for (const st of p.stamps) placed.push({ i, spec: p.spec, st }); });
   const img = imageFeatures(placed);
   const beh = behaviorFeatures(S.events);
   const feats = Object.assign({}, beh, img, {
@@ -1378,7 +1503,7 @@ function endRound(){
     round: S.round,
     features: feats,
     events: S.events.slice(),
-    placed: placed.map(o => ({ piece: o.i, x: +o.st.x.toFixed(4), y: +o.st.y.toFixed(4), rot: Math.round(o.st.rot), s: +scaleOf(o.st).toFixed(3), ink: +o.st.ink.toFixed(2) })),
+    placed: placed.map(o => ({ piece: o.i, x: +o.st.x.toFixed(4), y: +o.st.y.toFixed(4), rot: Math.round(o.st.rot), s: +scaleOf(o.st).toFixed(3), ink: +o.st.ink.toFixed(2), hue: hueOf(o.st) })),
     png: canvas.toDataURL('image/png'),
   });
 
@@ -1394,7 +1519,7 @@ function endRound(){
 document.getElementById('btnEnd').addEventListener('click', endRound);
 
 function resetRound(){
-  S.pieces = SPECS.map(s => ({ spec: s, placed: null, live: null }));
+  S.pieces = SPECS.map(s => ({ spec: s, stamps: [], placed: null, live: null }));
   S.hand = null; S.sel = null; S.drag = null;         // 换轮了，滑杆谁都不管
   S.events = [];
   S.t0 = now(); lastT = 0; lastRotT = 0; rotAccum = 0; lastScaleT = 0;
@@ -1411,12 +1536,15 @@ const LABELS = {
      写死的那句不会报错、不会崩，只会一直印「给了 12 块」——
      和文档里那三个作废读数同一种烂法：**它和真值长得一模一样**。
      凡是"数字会随牌面变"的说明文字，一律现算。 */
-  get pieces_used(){ return ['落墨块数', '一共落下几块墨（给了 ' + SPECS.length + ' 块，用几块由你定）']; },
+  /* 口径（本轮任务书 §一 改动一③）：**次数**不是块数 —— 同一块可以盖 N 次，每次算一笔。 */
+  get pieces_used(){ return ['落墨次数', '一共落了几笔墨（同一块放 N 次就记 N 笔；给了 ' + SPECS.length + ' 块，用几块由你定）']; },
   blank_ratio:            ['整纸留白', '白纸占整张纸的比例（只算你落下的墨）'],
   edge_blank:             ['边缘留白', '纸最外一圈的空白程度 —— 敢不敢画到边上'],
   center_bias:            ['墨迹重心偏移', '你这张的墨更靠中间还是更偏一侧'],
   ink_mean:               ['墨色均值', '你落下的每一块，平均用了多浓的墨'],
-  ink_sd:                 ['墨色反差', '各块之间的浓淡差多不多'],
+  ink_sd:                 ['墨色反差', '各笔之间的浓淡差多不多'],
+  hue_used:               ['用色分布', '每一笔用了哪个颜色、各几笔（色号 0 墨 · 1 赭石 · 2 花青 · 3 藤黄 · 4 朱砂；只用墨就是墨×N）'],
+  hue_sd:                 ['用色离散度', '各笔色号之间的离散程度（笔数不足两笔显示 —，只用一种色是 0）'],
   rotate_per_piece:       ['每块转动次数', '落每一块墨之前，你转动调整了几次'],
   scale_mean:             ['大小均值', '你落下的每一块，平均被放到原样的几倍（没动过滑杆就是 1.00）'],
   scale_range:            ['大小跨度', '同一张里最大的一块和最小的一块差多少（没调过就是 0）'],
@@ -1426,7 +1554,7 @@ const LABELS = {
 };
 function showSheet(){
   const agg = S.rounds.map(r => r.features);
-  const keys = ['pieces_used', 'blank_ratio', 'edge_blank', 'center_bias', 'ink_mean', 'ink_sd', 'rotate_per_piece', 'scale_mean', 'scale_range', 'reposition_count', 'first_place_ms', 'active_ms'];
+  const keys = ['pieces_used', 'blank_ratio', 'edge_blank', 'center_bias', 'ink_mean', 'ink_sd', 'hue_used', 'hue_sd', 'rotate_per_piece', 'scale_mean', 'scale_range', 'reposition_count', 'first_place_ms', 'active_ms'];
   /* 轮间变化给"相邻两对"，不是"首尾一对"。
      只比第三张与第一张会漏掉中途那次最大的波动：有人第二张突然铺开、第三张又收回来，
      首尾差读起来像"什么都没发生"，而那一次变化恰恰最该被看见。 */
@@ -1439,6 +1567,7 @@ function showSheet(){
   const dk = (k) => (f) => (f && f[k] != null ? f[k] : null);
   const adjacent = [0, 1].map((i) => keys.map((k) => {
     const a = dk(k)(agg[i]), b = dk(k)(agg[i + 1]);
+    if (k === 'hue_used') return null;   // 颜色清单不是数值，不参与求差（数组相减会变 NaN）
     return (a == null || b == null) ? null : b - a;
   }));
   let html = '<h2>原始信号卡</h2><div class="lead">这是你刚刚在纸上留下的全部记录。原始数字，不加解释。你可以不同意它。</div>';
@@ -1452,6 +1581,9 @@ function showSheet(){
       /* 一块不放就结束（SPEC-v5 头部边界句）：0 不是缺数据，是"本次未落墨"。
          数字照留 —— 0 本身是信号；这行标记只解释它，不是拿最小值挡住这条路。 */
       if (k === 'pieces_used' && v === 0) return '<td class="num">0 <span style="color:var(--dim);font-size:12px">· 本次未落墨</span></td>';
+      /* 用色分布不是单值：列成「墨×5 · 赭石×1」。一笔没落就没有色可列 —— 显示 —。 */
+      if (k === 'hue_used') return '<td class="num">' + (v.length
+        ? v.map((pr) => HUES[pr[0]].name + '×' + pr[1]).join(' · ') : '—') + '</td>';
       return '<td class="num">' + v + '</td>';
     }).join('');
     html += '<tr><td>' + L[0] + '</td>' + cells + '<td style="color:var(--dim);font-size:12px">' + L[1] + '</td></tr>';
@@ -1558,7 +1690,7 @@ function download(name, blob){
   SPECS = BASE_SPECS.concat(MASK_SPECS).sort((a, b) => a.g - b.g || a.z - b.z);
 
   paperCanvas = makePaper();
-  S.pieces = SPECS.map(s => ({ spec: s, placed: null, live: null }));
+  S.pieces = SPECS.map(s => ({ spec: s, stamps: [], placed: null, live: null }));
   S.t0 = now();
   buildTray();
   draw();
@@ -1576,25 +1708,30 @@ window.__moxin = {
   /* 调参用：改了 __moxinTune 之后必须清缓存，否则拿回来的还是按老参数画的那张 */
   clearPieceCache(){ pieceCache.clear(); },
   get features(){
+    /* 画像读数按纸上真实的每一笔来（盖章式：一块可能多笔；手上还没落的 live 也算上）。 */
     const placed = [];
     for (let i = 0; i < S.pieces.length; i++){
       const p = S.pieces[i];
-      const st = p.placed || (i === S.hand ? p.live : null);
-      if (st) placed.push({ i, spec: p.spec, st });
+      for (const st of p.stamps) placed.push({ i, spec: p.spec, st });
+      if (i === S.hand && p.live) placed.push({ i, spec: p.spec, st: p.live });
     }
     return Object.assign({}, behaviorFeatures(S.events), imageFeatures(placed), {
       handOpen: S.hand != null, done: S.done, round: S.round,
     });
   },
   get rounds(){ return S.rounds.map(r => ({ round: r.round, features: r.features })); },
-  /* 单独取一块墨的离屏位图：目检单块渲染用（tools/piece-zoom.cjs） */
-  piece(i, ink){ return getPieceCanvas(SPECS[i], ink == null ? S.ink : ink); },
+  /* 单独取一块墨的离屏位图：目检单块渲染用（tools/piece-zoom.cjs）
+     hue 参数是本次加的：不传就用当前笔上的色，传 0..4 指定色。 */
+  piece(i, ink, hue){ return getPieceCanvas(SPECS[i], ink == null ? S.ink : ink, hue == null ? S.hue : hue); },
+  /* 色表（探针/文档用）：只有色值、名字和视觉重量系数 —— 没有任何"情绪"字段 */
+  get hues(){ return HUES.map((h, i) => ({ i, id: h.id, name: h.name, css: h.css, f: h.f })); },
   api: {
     pick(i){ onChip(i); },
     moveTo(x, y){ if (S.hand != null && S.pieces[S.hand].live){ S.pieces[S.hand].live.x = x; S.pieces[S.hand].live.y = y; draw(); } },
     rotate(d){ rotate(d); },
     setScale(v, ui){ setScale(v, !!ui); },
     ink(v){ inkEl.value = Math.round(v * 100); inkEl.dispatchEvent(new Event('input')); },
+    hue(v){ setHue(+v); },
     commit,
     endRound,
   },
